@@ -19,6 +19,7 @@
 #include "llvm/ExecutionEngine/JIT.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Analysis/Passes.h"
 
 using namespace std;
 using namespace llvm;
@@ -65,16 +66,19 @@ class LLVMIRContext {
 	static void clearNameValues() { _namedValues.clear();  }
 	static IRBuilder<>& getBuilder() { return _builder; }
 	static Module* getModule() { return _module; }
+	static FunctionPassManager* getFPM() { return _fpm; }
+	static void setFPM(FunctionPassManager* fpm) { _fpm = fpm; }
 
     private:
 	static Module* _module;
 	static IRBuilder<> _builder;
 	static map<string, Value*> _namedValues;
+	static FunctionPassManager* _fpm;
 };
 IRBuilder<> LLVMIRContext::_builder = IRBuilder<>(getGlobalContext());
 Module* LLVMIRContext::_module= new Module("Kaleidoscope", getGlobalContext());
 map<string, Value*> LLVMIRContext::_namedValues;
-//ExecutionEngine* LLVMIRContext::_executionEngine = EngineBuilder(LLVMIRContext::getModule()).create();
+FunctionPassManager* LLVMIRContext::_fpm;
 
 class Token {
     public:
@@ -359,6 +363,7 @@ class FunctionAST {
 	    if (Value* ret = _body->codeGen()) {
 		LLVMIRContext::getBuilder().CreateRet(ret);
 		verifyFunction(*function);
+		LLVMIRContext::getFPM()->run(*function);
 		return function;
 	    }
 
@@ -434,10 +439,23 @@ class Parser {
 
 	    string err;
 	    _executionEngine = EngineBuilder(LLVMIRContext::getModule()).setErrorStr(&err).create();
-	    if (!_executionEngine) {
+	    if (!this->_executionEngine) {
 		cerr << "could not create ExecutionEngine. : " << err << endl;
 		exit(0);
 	    }
+
+	    FunctionPassManager* fpm = new FunctionPassManager(LLVMIRContext::getModule());
+
+	    fpm->add(new DataLayout(*(this->_executionEngine->getDataLayout())));
+	    fpm->add(createBasicAliasAnalysisPass());
+	    fpm->add(createInstructionCombiningPass());
+	    fpm->add(createReassociatePass());
+	    fpm->add(createGVNPass());
+	    fpm->add(createCFGSimplificationPass());
+
+	    fpm->doInitialization();
+
+	    LLVMIRContext::setFPM(fpm);
 	}
 
 	ExprAST* parserNumber() {
@@ -681,7 +699,7 @@ class CommandLine {
 };
 
 void runInterpreter() {
-    Parser parser = Parser();
+    Parser parser = Parser(true);
     string input;
 
     while (true) {
