@@ -68,17 +68,22 @@ class LLVMIRContext {
 	static Module* getModule() { return _module; }
 	static FunctionPassManager* getFPM() { return _fpm; }
 	static void setFPM(FunctionPassManager* fpm) { _fpm = fpm; }
+	static void enableOptimize(bool enabled = true) { _optimizeEnabled = enabled; }
+
+	static bool optimizeEnabled() { return _optimizeEnabled; }
 
     private:
 	static Module* _module;
 	static IRBuilder<> _builder;
 	static map<string, Value*> _namedValues;
 	static FunctionPassManager* _fpm;
+	static bool _optimizeEnabled;
 };
 IRBuilder<> LLVMIRContext::_builder = IRBuilder<>(getGlobalContext());
 Module* LLVMIRContext::_module= new Module("Kaleidoscope", getGlobalContext());
 map<string, Value*> LLVMIRContext::_namedValues;
 FunctionPassManager* LLVMIRContext::_fpm;
+bool LLVMIRContext::_optimizeEnabled = false;
 
 class Token {
     public:
@@ -363,7 +368,7 @@ class FunctionAST {
 	    if (Value* ret = _body->codeGen()) {
 		LLVMIRContext::getBuilder().CreateRet(ret);
 		verifyFunction(*function);
-		LLVMIRContext::getFPM()->run(*function);
+		if (LLVMIRContext::optimizeEnabled()) LLVMIRContext::getFPM()->run(*function);
 		return function;
 	    }
 
@@ -429,8 +434,8 @@ class IfExprAST : public ExprAST {
 
 class Parser {
     public:
-	Parser(bool dumpEnabled = false) 
-	    : _dumpEnabled(dumpEnabled)
+	Parser() 
+	    : _dumpEnabled(false), _optimizeEnabled(false)
 	{
 	    this->_precedence['<'] = 10;
 	    this->_precedence['+'] = 20;
@@ -613,7 +618,7 @@ class Parser {
 	    if (FunctionAST* ast = parseDefinition()) {
 		if (Function* f = ast->codeGen()) {
 		    if (_dumpEnabled) {
-			Prompt::println("Parsed a function definition.");
+			Prompt::println("parsed a function definition.");
 			f->dump();
 		    }
 		}
@@ -626,7 +631,7 @@ class Parser {
 	    if (PrototypeAST* ast = parseExtern()) {
 		if (Function* f = ast->codeGen()) {
 		    if (_dumpEnabled) {
-			Prompt::println("Parsed an extern.");
+			Prompt::println("parsed an extern.");
 			f->dump();
 		    }
 		}
@@ -639,7 +644,7 @@ class Parser {
 	    if (FunctionAST* ast = parseTopLevelExpr()) {
 		if (Function* f = ast->codeGen()) {
 		    if (_dumpEnabled) {
-			Prompt::println("Parsed a top-level expr.");
+			Prompt::println("parsed a top-level expr.");
 			f->dump();
 		    }
 
@@ -653,7 +658,7 @@ class Parser {
 	    }
 	} 
 
-	void parse(string input) {
+	void parse(const string& input) {
 	    this->_lexer = Lexer(input);
 	    getNextToken();
 
@@ -665,6 +670,8 @@ class Parser {
 		default: handleTopLevelExpression(); break;
 	    }
 	}
+
+	void enableDump(bool enabled = true) { _dumpEnabled = enabled; }
     private:
 	Token getNextToken() { return (this->_curToken = this->_lexer.getToken()); }
 
@@ -682,6 +689,7 @@ class Parser {
 	map<char, int> _precedence;
 	ExecutionEngine* _executionEngine;
 	bool _dumpEnabled;
+	bool _optimizeEnabled;
 };
 
 class CommandLine {
@@ -691,15 +699,15 @@ class CommandLine {
 
 	    for (int i=1; i<argc; i++) {
 		vector<string> kv = split(argv[i], '=');
-		args[kv[0]] = kv[1];
+		if (kv.size() == 2) args[kv[0]] = kv[1];
+		if (kv.size() == 1) args[kv[0]] = "1";
 	    }
 
 	    return args;
 	}
 };
 
-void runInterpreter() {
-    Parser parser = Parser(true);
+void runInterpreter(Parser& parser) {
     string input;
 
     while (true) {
@@ -713,31 +721,40 @@ void runInterpreter() {
 int main(int argc, char* argv[]) {
     InitializeNativeTarget();
 
-    if (argc == 1) {
-	runInterpreter();
+    map<string, string> args = CommandLine::parse(argc, argv);
+
+    string in = args["-i"];
+    string out = args["-o"];
+    bool dumpEnabled = args["--dump-enabled"] == "1";
+    bool optimizeEnabled = args["--opt-enabled"] == "1";
+
+    Parser parser;
+    parser.enableDump(dumpEnabled);
+    LLVMIRContext::enableOptimize(optimizeEnabled);
+
+    if (!in.empty())  cout << "input : " + in << endl;
+    if (!out.empty()) cout << "output : " + out << endl;
+    if (dumpEnabled)  cout << "dump enabled." << endl;
+    if (optimizeEnabled)  cout << "optimize enabled." << endl;
+
+    if (in.empty()) {
+	runInterpreter(parser);
     }
     else {
 	string input;
 
-	map<string, string> args = CommandLine::parse(argc, argv);
-	bool dumpEnabled = args["--dump-enabled"] == "1";
-
-	Parser parser(dumpEnabled);
-
-	string fname = args["-i"];
-	ifstream ifs(fname.c_str());
+	ifstream ifs(in.c_str());
 	if (!ifs) {
-	    cerr << "failed open file : " + fname << endl;
+	    cerr << "failed open file : " + in << endl;
 	    exit(0);
 	}
 
 	while (getline(ifs, input)) parser.parse(input);
 
-	string out = args["-o"];
 	if (!out.empty()) {
 	    FILE* fp = freopen(out.c_str(), "w", stderr);
 	    if (!fp) {
-		cerr << "failed open file : " + fname << endl;
+		cerr << "failed open file : " + out << endl;
 		exit(0);
 	    }
 
