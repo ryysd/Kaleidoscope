@@ -1,0 +1,3 @@
+extern putchar(char);
+def printstar(n) for i = 1, i < n, 1.0 in putchar(42);
+printstar(10);

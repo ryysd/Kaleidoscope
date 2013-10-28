@@ -63,6 +63,7 @@ class LLVMIRContext {
     public:
 	static Value* getNamedValue(string name) { return _namedValues[name]; }
 	static void setNamedValue(string name, Value* value) { _namedValues[name] = value; }
+	static void eraseNamedValue(string name) { _namedValues.erase(name);  }
 	static void clearNameValues() { _namedValues.clear();  }
 	static IRBuilder<>& getBuilder() { return _builder; }
 	static Module* getModule() { return _module; }
@@ -100,12 +101,14 @@ class Token {
 	static const string IF;
 	static const string THEN;
 	static const string ELSE;
+	static const string FOR;
+	static const string IN;
 
 	static const string EOL;
 
 	enum TokenType {
 	    TOKEN_EOF = 0, TOKEN_DEF, TOKEN_EXTERN, TOKEN_IDENTIFIER, TOKEN_NUMBER, TOKEN_LBRANCKET, TOKEN_RBRANCKET, TOKEN_BINOP, TOKEN_EOL, 
-	    TOKEN_IF, TOKEN_THEN, TOKEN_ELSE,
+	    TOKEN_IF, TOKEN_THEN, TOKEN_ELSE, TOKEN_FOR, TOKEN_IN,
 	    TOKEN_OTHERS
 	};
 
@@ -125,6 +128,8 @@ class Token {
 	    else if (token == Token::IF) this->_type = TOKEN_IF;
 	    else if (token == Token::THEN) this->_type = TOKEN_THEN;
 	    else if (token == Token::ELSE) this->_type = TOKEN_ELSE;
+	    else if (token == Token::FOR) this->_type = TOKEN_FOR;
+	    else if (token == Token::IN) this->_type = TOKEN_IN;
 	    else if (token == PLUS || token == MINUS || token == MULTIPLY || token == LESS_THAN) {
 		this->_binop = token.c_str()[0];
 		this->_type = TOKEN_BINOP;
@@ -167,6 +172,8 @@ const string Token::EOL= ";";
 const string Token::IF= "if";
 const string Token::THEN= "then";
 const string Token::ELSE= "else";
+const string Token::FOR = "for";
+const string Token::IN = "in";
 
 
 class Lexer {
@@ -432,6 +439,67 @@ class IfExprAST : public ExprAST {
       }
 };
 
+class ForExprAST : public ExprAST {
+    public:
+	ForExprAST(const string& varName, ExprAST* start, ExprAST* end, ExprAST* step, ExprAST* body)
+	    : _varName(varName), _start(start), _end(end), _step(step), _body(body)
+	{}
+
+	Value* codeGen() {
+	    Value* startV = this->_start->codeGen();
+	    if (!startV) return NULL;
+
+	    IRBuilder<>& builder = LLVMIRContext::getBuilder();
+
+	    Function* function = builder.GetInsertBlock()->getParent();
+	    BasicBlock* preHeaderBlock = builder.GetInsertBlock();
+	    BasicBlock* loopBlock = BasicBlock::Create(getGlobalContext(), "loop", function);
+
+	    builder.CreateBr(loopBlock);
+
+	    builder.SetInsertPoint(loopBlock);
+
+	    PHINode* variable = builder.CreatePHI(Type::getDoubleTy(getGlobalContext()), 2, this->_varName.c_str());
+	    variable->addIncoming(startV, preHeaderBlock);
+
+	    Value* oldVal = LLVMIRContext::getNamedValue(this->_varName);
+	    LLVMIRContext::setNamedValue(this->_varName, variable);
+
+	    if (!this->_body->codeGen()) return NULL;
+
+	    Value* stepV;
+	    if (this->_step) {
+		stepV = this->_step->codeGen();
+		if (!stepV) return NULL;
+	    } else {
+		stepV = ConstantFP::get(getGlobalContext(), APFloat(1.0));
+	    }
+
+	    Value* nextVar = builder.CreateFAdd(variable, stepV, "nextVar");
+
+	    Value* endCond = this->_end->codeGen();
+	    if (!endCond) return NULL;
+
+	    endCond = builder.CreateFCmpONE(endCond, ConstantFP::get(getGlobalContext(), APFloat(0.0)), "loopcond");
+
+	    BasicBlock* loopEndBlock = builder.GetInsertBlock();
+	    BasicBlock* afterBlock = BasicBlock::Create(getGlobalContext(), "afterLoop", function); 
+
+	    builder.CreateCondBr(endCond, loopBlock, afterBlock);
+
+	    builder.SetInsertPoint(afterBlock);
+
+	    variable->addIncoming(nextVar, loopEndBlock);
+	    if (oldVal) LLVMIRContext::setNamedValue(this->_varName, oldVal);
+	    else LLVMIRContext::eraseNamedValue(this->_varName);
+
+	    return Constant::getNullValue(Type::getDoubleTy(getGlobalContext()));
+	}
+    private:
+	string _varName;
+	ExprAST *_start, *_end, *_step, *_body;
+};
+
 class Parser {
     public:
 	Parser() 
@@ -512,6 +580,7 @@ class Parser {
 	        case Token::TOKEN_NUMBER: return parserNumber();
 		case Token::TOKEN_LBRANCKET: return parseParen();
 		case Token::TOKEN_IF: return parseIf();
+		case Token::TOKEN_FOR: return parseFor();
 		default: break;
 	    }
 	    return ErrorHandler::printError("unknown token when expecting an expression");
@@ -567,6 +636,46 @@ class Parser {
 	    if (!els) return NULL;
 
 	    return new IfExprAST(cond, then, els);
+	}
+
+	ExprAST* parseFor() {
+	    getNextToken();
+
+	    if (this->_curToken.getType() != Token::TOKEN_IDENTIFIER) 
+		return ErrorHandler::printError("expected identifier after for");
+
+	    string id = this->_curToken.getToken();
+	    getNextToken();
+
+	    if (this->_curToken.getToken() != "=")
+		return ErrorHandler::printError("expected '=' after for");
+
+	    getNextToken();
+	    ExprAST* start = parseExpression();
+	    if (!start) return NULL;
+
+	    if (this->_curToken.getToken() != ",") 
+		return ErrorHandler::printError("expected ',' after for start value");
+	    getNextToken();
+
+	    ExprAST* end = parseExpression();
+	    if (!end) return NULL;
+
+	    ExprAST* step = NULL;
+	    if (this->_curToken.getToken() == ",") {
+		getNextToken();
+		step = parseExpression();
+		if (!step) return NULL;
+	    }
+
+	    if (this->_curToken.getType() != Token::TOKEN_IN)
+		return ErrorHandler::printError("expected 'in' after for");
+
+	    getNextToken();
+	    ExprAST* body = parseExpression();
+	    if (!body) return NULL;
+
+	    return new ForExprAST(id, start, end, step, body);
 	}
 
 	PrototypeAST* parsePrototype() {
