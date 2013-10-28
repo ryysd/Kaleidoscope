@@ -35,6 +35,18 @@ vector<string> split(const string &str, char delim){
     return res;
 }
 
+extern "C" 
+double putchard(double d) {
+    putchar((char)d);
+    return 0;
+}
+
+extern "C" 
+double printd(double d) {
+    printf("%f\n", d);
+    return 0;
+}
+
 class ErrorHandler {
     public:
 	static ExprAST* printError(const string& str) { cerr << str << endl; return NULL;}
@@ -112,7 +124,9 @@ class Token {
 	    TOKEN_OTHERS
 	};
 
-	Token () {}
+	Token () 
+	    : _token(""), _type(-1)
+	{}
 
 	Token(string token) {
 	    this->_token = token;
@@ -209,8 +223,11 @@ class Lexer {
 		    continue;
 		}
 
-		token = *(it++);
-		this->_tokens.push_back(token);
+		if (it != end) {
+		    token = *(it++);
+		    this->_tokens.push_back(token);
+		}
+		else break;
 	    }
 	}
 
@@ -771,16 +788,20 @@ class Parser {
 	    this->_lexer = Lexer(input);
 	    getNextToken();
 
-	    switch(this->_curToken.getType()) {
-		case Token::TOKEN_EOF: return;
-		case Token::TOKEN_EOL: getNextToken(); break;
-		case Token::TOKEN_DEF: handleDefinition(); break;
-		case Token::TOKEN_EXTERN: handleExtern(); break;
-		default: handleTopLevelExpression(); break;
+	    while (!isEmpty()) {
+		switch(this->_curToken.getType()) {
+		    case Token::TOKEN_EOF: return;
+		    case Token::TOKEN_EOL: getNextToken(); break;
+		    case Token::TOKEN_DEF: handleDefinition(); break;
+		    case Token::TOKEN_EXTERN: handleExtern(); break;
+		    default: handleTopLevelExpression(); break;
+		}
 	    }
 	}
 
 	void enableDump(bool enabled = true) { _dumpEnabled = enabled; }
+
+	bool isEmpty() { return this->_curToken.getType() == Token::TOKEN_EOF; }
     private:
 	Token getNextToken() { return (this->_curToken = this->_lexer.getToken()); }
 
@@ -858,7 +879,9 @@ int main(int argc, char* argv[]) {
 	    exit(0);
 	}
 
-	while (getline(ifs, input)) parser.parse(input);
+	string buf;
+	while (getline(ifs, buf)) input += buf + '\n';
+	parser.parse(input);
 
 	if (!out.empty()) {
 	    FILE* fp = freopen(out.c_str(), "w", stderr);
