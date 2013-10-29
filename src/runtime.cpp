@@ -115,12 +115,14 @@ class Token {
 	static const string ELSE;
 	static const string FOR;
 	static const string IN;
+	static const string UNARY;
+	static const string BINARY;
 
 	static const string EOL;
 
 	enum TokenType {
 	    TOKEN_EOF = 0, TOKEN_DEF, TOKEN_EXTERN, TOKEN_IDENTIFIER, TOKEN_NUMBER, TOKEN_LBRANCKET, TOKEN_RBRANCKET, TOKEN_BINOP, TOKEN_EOL, 
-	    TOKEN_IF, TOKEN_THEN, TOKEN_ELSE, TOKEN_FOR, TOKEN_IN,
+	    TOKEN_IF, TOKEN_THEN, TOKEN_ELSE, TOKEN_FOR, TOKEN_IN, TOKEN_UNARY, TOKEN_BINARY,
 	    TOKEN_OTHERS
 	};
 
@@ -144,6 +146,8 @@ class Token {
 	    else if (token == Token::ELSE) this->_type = TOKEN_ELSE;
 	    else if (token == Token::FOR) this->_type = TOKEN_FOR;
 	    else if (token == Token::IN) this->_type = TOKEN_IN;
+	    else if (token == Token::UNARY) this->_type = TOKEN_UNARY;
+	    else if (token == Token::BINARY) this->_type = TOKEN_BINARY;
 	    else if (token == PLUS || token == MINUS || token == MULTIPLY || token == LESS_THAN) {
 		this->_binop = token.c_str()[0];
 		this->_type = TOKEN_BINOP;
@@ -188,6 +192,8 @@ const string Token::THEN= "then";
 const string Token::ELSE= "else";
 const string Token::FOR = "for";
 const string Token::IN = "in";
+const string Token::UNARY = "unary";
+const string Token::BINARY = "binary";
 
 
 class Lexer {
@@ -303,8 +309,14 @@ class BinaryExprAST : public ExprAST {
 	        case '<' : 
 			   l = builder.CreateFCmpULT(l, r, "cmptmp");
 			   return builder.CreateUIToFP(l, Type::getDoubleTy(getGlobalContext()), "booltmp");
-		default : return ErrorHandler::printErrorValue("invalid binary operator.");
+		default : break; 
 	    }
+
+	    Function* f = LLVMIRContext::getModule()->getFunction("binary" + _op);
+	    if (!f) return ErrorHandler::printErrorValue("undefined binary operator : " + _op);
+
+	    Value* ops[2] = { l, r };
+	    return builder.CreateCall(f, ops, "binop");
 	}
     private:
 	char _op;
@@ -338,14 +350,14 @@ class CallExprAST : public ExprAST {
 
 class PrototypeAST {
     public:
-	PrototypeAST(const string &name, const vector<std::string> &args)
-	    : _name(name), _args(args) {}
+	PrototypeAST(const string &name, const vector<std::string> &args, bool isOperator = false, int prec = 0)
+	    : _name(name), _args(args), _isOperator(isOperator), _prec(prec) {}
 
 	Function* codeGen() {
 	    vector<Type*> doubles(_args.size(), Type::getDoubleTy(getGlobalContext()));
-	    FunctionType *ft = FunctionType::get(Type::getDoubleTy(getGlobalContext()), doubles, false);
+	    FunctionType* ft = FunctionType::get(Type::getDoubleTy(getGlobalContext()), doubles, false);
 
-	    Function *f = Function::Create(ft, Function::ExternalLinkage, _name, LLVMIRContext::getModule());
+	    Function* f = Function::Create(ft, Function::ExternalLinkage, _name, LLVMIRContext::getModule());
 
 	    if (f->getName() != _name) {
 		f->eraseFromParent();
@@ -370,9 +382,18 @@ class PrototypeAST {
 	    }
 	    return f;
 	}
+
+	bool isUnaryOp() { return this->_isOperator && this->_args.size() == 1; }
+	bool isBinaryOp() { return this->_isOperator && this->_args.size() == 2; }
+
+	string getName() { return this->_name; }
+	char getOpName() { return this->_name.c_str()[0]; }
+	int getPrecedence() { return this->_prec; }
     private:
 	string _name;
 	vector<std::string> _args;
+	bool _isOperator;
+	int _prec;
 };
 
 class FunctionAST {
@@ -518,14 +539,16 @@ class ForExprAST : public ExprAST {
 };
 
 class Parser {
+    static const string binOpPrefix;
+
     public:
 	Parser() 
 	    : _dumpEnabled(false), _optimizeEnabled(false)
 	{
-	    this->_precedence['<'] = 10;
-	    this->_precedence['+'] = 20;
-	    this->_precedence['-'] = 30;
-	    this->_precedence['*'] = 40;
+	    setPrecedence('<', 10);
+	    setPrecedence('+', 20);
+	    setPrecedence('-', 30);
+	    setPrecedence('*', 40);
 
 	    string err;
 	    _executionEngine = EngineBuilder(LLVMIRContext::getModule()).setErrorStr(&err).create();
@@ -696,30 +719,58 @@ class Parser {
 	}
 
 	PrototypeAST* parsePrototype() {
-	    if (this->_curToken.getType() != Token::TOKEN_IDENTIFIER)
-		return ErrorHandler::printErrorProto("Expected function name in prototype");
+	    string fnName;
+	    int binOpPrec = Parser::_defaultPrec;
+	    int opArgsNum = 0;
 
-	    string fnName = this->_curToken.getToken();
-	    getNextToken();
+	    switch (this->_curToken.getType()) {
+		case Token::TOKEN_IDENTIFIER:
+		    fnName = this->_curToken.getToken();
+		    opArgsNum = 0;
+		    getNextToken();
+		    break;
+		case Token::TOKEN_BINARY:
+		    getNextToken();
+		    fnName = Parser::binOpPrefix;
+		    fnName += this->_curToken.getToken();
+		    opArgsNum = 2;
+		    getNextToken();
+
+		    if (this->_curToken.getType() == Token::TOKEN_NUMBER) {
+			binOpPrec = (int)this->_curToken.getTokenVal();
+			getNextToken();
+		    }
+		    break;
+		default:
+		    return ErrorHandler::printErrorProto("expected function name in prototype");
+	    }
+
 
 	    if (this->_curToken.getToken() != Token::LBRANCKET)
-		return ErrorHandler::printErrorProto("Expected '(' in prototype");
+		return ErrorHandler::printErrorProto("expected '(' in prototype");
 
 	    vector<string> argNames;
 	    while (getNextToken().getType() == Token::TOKEN_IDENTIFIER)
 		argNames.push_back(this->_curToken.getToken());
 	    if (this->_curToken.getToken() != Token::RBRANCKET)
-		return ErrorHandler::printErrorProto("Expected ')' in prototype");
+		return ErrorHandler::printErrorProto("expected ')' in prototype");
 
 	    getNextToken();
 
-	    return new PrototypeAST(fnName, argNames);
+	    if (opArgsNum && argNames.size() != opArgsNum) 
+		return ErrorHandler::printErrorProto("invalid number of operands for operator");
+
+	    return new PrototypeAST(fnName, argNames, opArgsNum != 0, binOpPrec);
 	}
 
 	FunctionAST* parseDefinition() {
 	    getNextToken();
 	    PrototypeAST* proto = parsePrototype();
 	    if (!proto) return NULL;
+
+	    if (proto->isBinaryOp()) {
+		Parser::setPrecedence(proto->getOpName(), proto->getPrecedence());
+	    }
 
 	    if (ExprAST* e = parseExpression())
 		return new FunctionAST(proto, e);
@@ -802,6 +853,9 @@ class Parser {
 	void enableDump(bool enabled = true) { _dumpEnabled = enabled; }
 
 	bool isEmpty() { return this->_curToken.getType() == Token::TOKEN_EOF; }
+
+	void setPrecedence(char op, int prec) { Parser::_precedence[op] = prec; }
+	int getPrecedence(char op) { return Parser::_precedence[op]; }
     private:
 	Token getNextToken() { return (this->_curToken = this->_lexer.getToken()); }
 
@@ -816,11 +870,17 @@ class Parser {
 
 	Lexer _lexer;
 	Token _curToken;
-	map<char, int> _precedence;
+	static map<char, int> _precedence;
 	ExecutionEngine* _executionEngine;
 	bool _dumpEnabled;
 	bool _optimizeEnabled;
+
+	static int _defaultPrec;
 };
+
+int Parser::_defaultPrec = 30;
+const string Parser::binOpPrefix = "binary";
+map<char, int> Parser::_precedence;
 
 class CommandLine {
     public:
