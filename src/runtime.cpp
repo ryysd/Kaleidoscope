@@ -58,12 +58,12 @@ class ErrorHandler {
 class Prompt {
     public:
 	static void print(string str) {
-	    cerr << prmpt << str;
+	    cout << prmpt << str;
 	}
 
 	static void println(string str) {
 	    print(str);
-	    cerr << endl;
+	    cout << endl;
 	}
 
     private:
@@ -543,7 +543,7 @@ class Parser {
 
     public:
 	Parser() 
-	    : _dumpEnabled(false), _optimizeEnabled(false)
+	    : _dumpEnabled(false), _optimizeEnabled(false), _dumpOnly(false)
 	{
 	    setPrecedence('<', 10);
 	    setPrecedence('+', 20);
@@ -825,10 +825,13 @@ class Parser {
 			f->dump();
 		    }
 
-		    void* fptr = _executionEngine->getPointerToFunction(f);
-
-		    double (*fp)() = (double (*)())(intptr_t)fptr;
-		    cerr << fp() << endl;
+		    if (!_dumpOnly) {
+		      void* fptr = _executionEngine->getPointerToFunction(f);
+		      double (*fp)() = (double (*)())(intptr_t)fptr;
+		      stringstream ss;
+		      ss << fp();
+		      Prompt::println(ss.str());
+		    }
 		}
 	    } else {
 		getNextToken();
@@ -851,6 +854,7 @@ class Parser {
 	}
 
 	void enableDump(bool enabled = true) { _dumpEnabled = enabled; }
+	void enableDumpOnly(bool enabled = true) { _dumpOnly = enabled; }
 
 	bool isEmpty() { return this->_curToken.getType() == Token::TOKEN_EOF; }
 
@@ -872,6 +876,7 @@ class Parser {
 	Token _curToken;
 	static map<char, int> _precedence;
 	ExecutionEngine* _executionEngine;
+	bool _dumpOnly;
 	bool _dumpEnabled;
 	bool _optimizeEnabled;
 
@@ -915,15 +920,20 @@ int main(int argc, char* argv[]) {
 
     string in = args["-i"];
     string out = args["-o"];
+    bool dumpOnly = args["--dump-only"] == "1";
     bool dumpEnabled = args["--dump-enabled"] == "1";
     bool optimizeEnabled = args["--opt-enabled"] == "1";
 
+    if (dumpOnly) dumpEnabled = true;
+
     Parser parser;
     parser.enableDump(dumpEnabled);
+    parser.enableDumpOnly(dumpOnly);
     LLVMIRContext::enableOptimize(optimizeEnabled);
 
     if (!in.empty())  cout << "input : " + in << endl;
     if (!out.empty()) cout << "output : " + out << endl;
+    if (dumpOnly)  cout << "dump only." << endl;
     if (dumpEnabled)  cout << "dump enabled." << endl;
     if (optimizeEnabled)  cout << "optimize enabled." << endl;
 
