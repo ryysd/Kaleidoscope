@@ -117,12 +117,13 @@ class Token {
 	static const string IN;
 	static const string UNARY;
 	static const string BINARY;
+	static const string COMMA;
 
 	static const string EOL;
 
 	enum TokenType {
 	    TOKEN_EOF = 0, TOKEN_DEF, TOKEN_EXTERN, TOKEN_IDENTIFIER, TOKEN_NUMBER, TOKEN_LBRANCKET, TOKEN_RBRANCKET, TOKEN_BINOP, TOKEN_EOL, 
-	    TOKEN_IF, TOKEN_THEN, TOKEN_ELSE, TOKEN_FOR, TOKEN_IN, TOKEN_UNARY, TOKEN_BINARY,
+	    TOKEN_IF, TOKEN_THEN, TOKEN_ELSE, TOKEN_FOR, TOKEN_IN, TOKEN_UNARY, TOKEN_BINARY, TOKEN_COMMA,
 	    TOKEN_OTHERS
 	};
 
@@ -148,6 +149,7 @@ class Token {
 	    else if (token == Token::IN) this->_type = TOKEN_IN;
 	    else if (token == Token::UNARY) this->_type = TOKEN_UNARY;
 	    else if (token == Token::BINARY) this->_type = TOKEN_BINARY;
+	    else if (token == Token::COMMA) this->_type = TOKEN_COMMA;
 	    else if (token == PLUS || token == MINUS || token == MULTIPLY || token == LESS_THAN) {
 		this->_binop = token.c_str()[0];
 		this->_type = TOKEN_BINOP;
@@ -165,9 +167,13 @@ class Token {
 	}
 
 	string getToken() {return _token;}
-	char getBinOp() {return _binop;}
+	//char getBinOp() {return _binop;}
+	char getBinOp() {return _token.c_str()[_token.length() - 1];}
 	int getType() {return _type;}
 	double getTokenVal() {return _tokenVal;}
+	bool isAscii() {return _token.length() == 1 && isascii(_token.c_str()[0]);}
+	bool isAlNum() {return _token.length() == 1 && isalnum(_token.c_str()[0]);}
+	bool isUnary() {return isAscii() && !isAlNum() && _type != Token::TOKEN_LBRANCKET && _type != Token::TOKEN_COMMA;}
 
     private:
 	int _type;
@@ -194,6 +200,7 @@ const string Token::FOR = "for";
 const string Token::IN = "in";
 const string Token::UNARY = "unary";
 const string Token::BINARY = "binary";
+const string Token::COMMA = "comma";
 
 
 class Lexer {
@@ -225,7 +232,7 @@ class Lexer {
 		}
 
 		if ((*it) == '#') {
-		    while ((*it) != EOF && (*it) != '\n' && (*it) != '\r');
+		    while ((*it) != EOF && (*it) != '\n' && (*it) != '\r') it++;
 		    continue;
 		}
 
@@ -288,6 +295,27 @@ class VariantExprAST : public ExprAST {
 	string _name;
 };
 
+class UnaryExprAST : public ExprAST {
+  public:
+    UnaryExprAST(char opcode, ExprAST* operand) 
+      : _opcode(opcode), _operand(operand) {}
+
+    Value *codeGen() {
+      Value* v = this->_operand->codeGen();
+      if (!v) return NULL;
+
+      Function *f = LLVMIRContext::getModule()->getFunction(string("unary") + _opcode);
+
+      if (!f)
+	return ErrorHandler::printErrorValue("unknown unary operator");
+
+      return LLVMIRContext::getBuilder().CreateCall(f, v, "unop");
+    }
+  private:
+    char _opcode;
+    ExprAST *_operand;
+};
+
 class BinaryExprAST : public ExprAST {
     public:
 	BinaryExprAST(char op, ExprAST *lhs, ExprAST *rhs)
@@ -312,7 +340,7 @@ class BinaryExprAST : public ExprAST {
 		default : break; 
 	    }
 
-	    Function* f = LLVMIRContext::getModule()->getFunction("binary" + _op);
+	    Function* f = LLVMIRContext::getModule()->getFunction(string("binary") + _op);
 	    if (!f) return ErrorHandler::printErrorValue("undefined binary operator : " + _op);
 
 	    Value* ops[2] = { l, r };
@@ -387,7 +415,7 @@ class PrototypeAST {
 	bool isBinaryOp() { return this->_isOperator && this->_args.size() == 2; }
 
 	string getName() { return this->_name; }
-	char getOpName() { return this->_name.c_str()[0]; }
+	char getOpName() { return this->_name.c_str()[this->_name.length()-1]; }
 	int getPrecedence() { return this->_prec; }
     private:
 	string _name;
@@ -627,7 +655,7 @@ class Parser {
 	}
 
 	ExprAST* parseExpression() {
-	    ExprAST* lhs = parsePrimary();
+	    ExprAST* lhs = parseUnary();
 	    if (!lhs) return NULL;
 
 	    return parseBinOpRHS(0, lhs);
@@ -641,8 +669,8 @@ class Parser {
 		int binOp = _curToken.getBinOp();
 
 		getNextToken();
-		ExprAST* rhs = parsePrimary();
 
+		ExprAST* rhs = parseUnary();
 		if (!rhs) return 0;
 
 		int nextPrec = getTokPrecedence();
@@ -654,20 +682,34 @@ class Parser {
 	    }
 	}
 
+	ExprAST* parseUnary() {
+	  if (!this->_curToken.isUnary()) {
+	    return parsePrimary();
+	  }
+
+	  char op = this->_curToken.getToken().c_str()[0];
+	  getNextToken();
+
+	  if (ExprAST* operand = parseUnary()) {
+	    return new UnaryExprAST(op, operand);
+	  }
+	  return NULL;
+	}
+
 	ExprAST* parseIf() {
 	    getNextToken();  
 
 	    ExprAST* cond = parseExpression();
 	    if (!cond) return NULL;
 
-	    if (_curToken.getType() != Token::TOKEN_THEN)
+	    if (this->_curToken.getType() != Token::TOKEN_THEN)
 		return ErrorHandler::printError("expected then");
 	    getNextToken(); 
 
 	    ExprAST* then = parseExpression();
 	    if (!then) return NULL;
 
-	    if (_curToken.getType()!= Token::TOKEN_ELSE)
+	    if (this->_curToken.getType()!= Token::TOKEN_ELSE)
 		return ErrorHandler::printError("expected else");
 
 	    getNextToken();
@@ -740,6 +782,15 @@ class Parser {
 			binOpPrec = (int)this->_curToken.getTokenVal();
 			getNextToken();
 		    }
+		    break;
+		case Token::TOKEN_UNARY:
+		    getNextToken();
+		    if (!this->_curToken.isAscii())
+		      return ErrorHandler::printErrorProto("expected unary operator in prototype");
+		    fnName = "unary";
+		    fnName += this->_curToken.getToken();
+		    opArgsNum = 1;
+		    getNextToken();
 		    break;
 		default:
 		    return ErrorHandler::printErrorProto("expected function name in prototype");
