@@ -887,7 +887,7 @@ class Parser {
 	  void* fptr = _executionEngine->getPointerToFunction(f);
 	  double (*fp)() = (double (*)())(intptr_t)fptr;
 	  stringstream ss;
-	  ss << fp();
+	  ss << "Evaluated to " << fp();
 	  Prompt::println(ss.str());
 	}
       }
